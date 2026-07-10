@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 
 // --------------------------------------------------------
 // HARDWARE DEFINES & GRAPHICS FUNCTIONS
@@ -50,6 +51,22 @@ void drawBackground() {
         // FIXED: Now writes to our invisible canvas
         backBuffer[i] = grassColor;
     }
+}
+
+void fillRect(int x, int y, int w, int h, u16 color) {
+    for (int iy = 0; iy < h; iy++) {
+        for (int ix = 0; ix < w; ix++) {
+            drawPixel(x + ix, y + iy, color);
+        }
+    }
+}
+
+// Draws an empty box outline
+void drawRectOutline(int x, int y, int w, int h, u16 color) {
+    drawLine(x, y, x + w, y, color);
+    drawLine(x, y + h, x + w, y + h, color);
+    drawLine(x, y, x, y + h, color);
+    drawLine(x + w, y, x + w, y + h, color);
 }
 
 void clearScreen(u16 color) {
@@ -107,8 +124,14 @@ public:
     float train_position; 
     float speed;
     int anim_timer;
+    float total_map_length;
 
-    GameContext() : state(GameState::MENU), selected_option(0), needs_redraw(true), train_position(0.0f), speed(0.0f) {}
+    GameContext() : state(GameState::MENU), selected_option(0), needs_redraw(true), train_position(0.0f), speed(0.0f) {
+        total_map_length = 0.0f;
+        for (int i = 0; i < MAP_SEGMENTS; i++) {
+            total_map_length += trackMap[i].length;
+        }
+    }
 
     void switchState(GameState newState) {
         state = newState;
@@ -233,6 +256,91 @@ int main() {
                 prev_sx_r = sx_r;
                 prev_sy = sy;
             }
+
+            int max_speed_height = 50;
+            int current_speed_height = (int)((ctx.speed / 5.0f) * max_speed_height);
+            
+            // Color shifts based on speed (Green -> Yellow -> Red)
+            u16 speedColor = RGB5(0, 31, 0); // Green
+            if (ctx.speed > 2.0f) speedColor = RGB5(31, 31, 0); // Yellow
+            if (ctx.speed > 3.5f) speedColor = RGB5(31, 0, 0);  // Red
+
+            // Draw the speed bar growing upwards
+            fillRect(10, 140 - current_speed_height, 10, current_speed_height, speedColor);
+            drawRectOutline(9, 140 - max_speed_height, 12, max_speed_height + 1, RGB5(31, 31, 31));
+
+            // 2. MINI-MAP / ROUTE PROGRESS (Top center horizontal bar)
+            int map_width = 100;
+            int map_x = (SCREEN_WIDTH / 2) - (map_width / 2); // Center it
+            int map_y = 10;
+            
+            // Draw background track line
+            fillRect(map_x, map_y, map_width, 4, RGB5(10, 10, 10));
+            drawRectOutline(map_x - 1, map_y - 1, map_width + 2, 6, RGB5(20, 20, 20));
+
+            // Calculate train blip position
+            float progress = ctx.train_position / ctx.total_map_length;
+            if (progress > 1.0f) progress = 1.0f; // Cap at 100%
+            int train_dot_x = map_x + (int)(progress * (map_width - 4));
+            
+            // Draw train blip (Cyan)
+            fillRect(train_dot_x, map_y - 1, 4, 6, RGB5(0, 31, 31));
+
+            // 3. LOCAL TOP-DOWN MAP (Bottom right corner)
+            int td_w = 40; // Smaller width
+            int td_h = 50; // Slightly taller to see ahead
+            int td_x = SCREEN_WIDTH - td_w - 5; 
+            int td_y = SCREEN_HEIGHT - td_h - 5; 
+            
+            // Draw map background
+            fillRect(td_x, td_y, td_w, td_h, RGB5(2, 2, 2));
+            drawRectOutline(td_x - 1, td_y - 1, td_w + 2, td_h + 2, RGB5(15, 15, 15));
+
+            float look_behind = 35.0f;
+            float look_ahead = 35.0f;
+            
+            // Pass 1: Find the train's exact X drift to use as our camera center
+            float train_sim_x = 0.0f;
+            float temp_dx = 0.0f;
+            for (float d = 0; d < ctx.train_position; d += 1.0f) {
+                temp_dx += (getCurveAtDistance(d) * 2.5f);
+                train_sim_x += temp_dx;
+            }
+
+            // Pass 2: Draw only the track window
+            float sim_dx = 0.0f;
+            float sim_x = 0.0f;
+            int prev_map_x = -1, prev_map_y = -1;
+            
+            for (float d = 0; d < ctx.train_position + look_ahead; d += 1.0f) {
+                sim_dx += (getCurveAtDistance(d) * 2.5f);
+                sim_x += sim_dx;
+
+                // Only draw if the track is within our 50m moving window
+                if (d >= ctx.train_position - look_behind) {
+                    // Map distance to Y axis (bottom = behind, top = ahead)
+                    float window_pos = d - (ctx.train_position - look_behind);
+                    int plot_y = td_y + td_h - (int)((window_pos / (look_ahead + look_behind)) * td_h);
+                    
+                    // Center the X axis around the train, scale down to fit the small box
+                    int plot_x = td_x + (td_w / 2) + (int)((sim_x - train_sim_x) * 0.2f);
+                    
+                    // Clamp drawing to the box so it doesn't spill over
+                    if (plot_x < td_x) plot_x = td_x;
+                    if (plot_x >= td_x + td_w) plot_x = td_x + td_w - 1;
+
+                    if (prev_map_x != -1) {
+                        drawLine(prev_map_x, prev_map_y, plot_x, plot_y, RGB5(10, 31, 10)); // Green track
+                    }
+                    prev_map_x = plot_x;
+                    prev_map_y = plot_y;
+                }
+            }
+            
+            // Draw the train exactly at its camera center
+            int p_plot_y = td_y + td_h - (int)((look_behind / (look_ahead + look_behind)) * td_h);
+            int p_plot_x = td_x + (td_w / 2);
+            fillRect(p_plot_x - 1, p_plot_y - 1, 3, 3, RGB5(31, 0, 0));
             
             VBlankIntrWait();
             dmaCopy(backBuffer, (void*)VIDEO_BUFFER, SCREEN_WIDTH * SCREEN_HEIGHT * 2);
