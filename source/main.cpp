@@ -94,7 +94,9 @@ float getCurveAtDistance(float distance) {
 // --------------------------------------------------------
 enum class GameState {
     MENU,
-    PLAY
+    PLAY,
+    DERAIL_ANIM,
+    DERAIL
 };
 
 class GameContext {
@@ -104,6 +106,7 @@ public:
     bool needs_redraw;
     float train_position; 
     float speed;
+    int anim_timer;
 
     GameContext() : state(GameState::MENU), selected_option(0), needs_redraw(true), train_position(0.0f), speed(0.0f) {}
 
@@ -118,6 +121,9 @@ public:
             REG_DISPCNT = MODE_3 | BG2_ON;
             train_position = 0.0f;
             speed = 0.0f;
+        } else if (newState == GameState::DERAIL) {
+            REG_DISPCNT = MODE_0 | BG0_ON;
+            consoleDemoInit();
         }
     }
 };
@@ -173,6 +179,18 @@ int main() {
 
             ctx.train_position += ctx.speed;
 
+            float current_curve = getCurveAtDistance(ctx.train_position);
+        
+            // We use standard C++ abs() to make negative (left) curves positive for the math
+            float g_force = ctx.speed * abs(current_curve); 
+        
+            // A threshold of 0.10 means a sharp 0.04 curve has a max safe speed of 2.5
+            if (g_force > 0.10f) {
+                ctx.anim_timer = 60; 
+                ctx.switchState(GameState::DERAIL_ANIM);
+                continue; // Skip the rest of the drawing loop this frame
+            }
+
             if (keys & KEY_B) {
                 ctx.switchState(GameState::MENU);
                 continue;
@@ -219,6 +237,71 @@ int main() {
             VBlankIntrWait();
             dmaCopy(backBuffer, (void*)VIDEO_BUFFER, SCREEN_WIDTH * SCREEN_HEIGHT * 2);
 
+        } else if (ctx.state == GameState::DERAIL) {
+            if (ctx.needs_redraw) {
+                iprintf("\x1b[2J"); 
+                iprintf("\x1b[7;3H!!! FATAL DERAILMENT !!!");
+                iprintf("\x1b[9;3HYou took a curve too fast.");
+                iprintf("\x1b[14;3HPress A to return to Menu");
+                ctx.needs_redraw = false;
+            }
+
+            // Wait for player to press A to try again
+            if (keys & KEY_A) {
+                ctx.switchState(GameState::MENU);
+            }
+        } else if (ctx.state == GameState::DERAIL_ANIM) {
+            ctx.anim_timer--;
+
+            // When the 60 frames are up, switch to the final text screen
+            if (ctx.anim_timer <= 0) {
+                ctx.switchState(GameState::DERAIL);
+                continue;
+            }
+
+            // Flash the screen red every 8 frames
+            if (ctx.anim_timer % 8 < 4) {
+                for (int i = 0; i < SCREEN_WIDTH * SCREEN_HEIGHT; i++) backBuffer[i] = RGB5(31, 0, 0);
+            } else {
+                drawBackground();
+            }
+
+            // Generate violent random screen shake
+            int shake_x = (rand() % 21) - 10; // Random number between -10 and +10
+            int shake_y = (rand() % 11) - 5;
+
+            float track_x = 0;
+            float track_dx = 0;
+            float camera_y = 1.0f; // Drop the camera down to the ground!
+
+            int prev_sx_l = -1, prev_sy = -1, prev_sx_r = -1;
+
+            for (int i = 1; i < 30; i++) {
+                float z = i * 2.0f; 
+                float curve = getCurveAtDistance(ctx.train_position + z);
+                track_dx += curve;
+                track_x += track_dx;
+
+                // Add the shake offsets to the screen coordinates
+                int sx_l = 120 + (int)((track_x - 3.0f) / z * 100.0f) + shake_x; 
+                int sx_r = 120 + (int)((track_x + 3.0f) / z * 100.0f) + shake_x; 
+                int sy   = 60 + (int)(camera_y / z * 100.0f) + shake_y;          
+
+                if (sy >= SCREEN_HEIGHT) sy = SCREEN_HEIGHT - 1;
+
+                if (prev_sy != -1) {
+                    drawLine(prev_sx_l, prev_sy, sx_l, sy, RGB5(28, 28, 28));
+                    drawLine(prev_sx_r, prev_sy, sx_r, sy, RGB5(28, 28, 28));
+                    if ((i + (int)ctx.train_position) % 2 == 0) {
+                        drawLine(sx_l, sy, sx_r, sy, RGB5(14, 9, 5));
+                    }
+                }
+
+                prev_sx_l = sx_l; prev_sx_r = sx_r; prev_sy = sy;
+            }
+
+            VBlankIntrWait();
+            dmaCopy(backBuffer, (void*)VIDEO_BUFFER, SCREEN_WIDTH * SCREEN_HEIGHT * 2);
         }
     }
 
