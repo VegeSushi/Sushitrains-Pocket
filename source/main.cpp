@@ -12,9 +12,12 @@
 // FIXED: Use libgba's VRAM address, but cast it so we can write to it
 #define VIDEO_BUFFER ((volatile u16*)VRAM) 
 
+u16* backBuffer;
+
 void drawPixel(int x, int y, u16 color) {
     if (x >= 0 && x < SCREEN_WIDTH && y >= 0 && y < SCREEN_HEIGHT) {
-        VIDEO_BUFFER[y * SCREEN_WIDTH + x] = color;
+        // FIXED: Now writes to our invisible canvas
+        backBuffer[y * SCREEN_WIDTH + x] = color; 
     }
 }
 
@@ -34,18 +37,18 @@ void drawLine(int x0, int y0, int x1, int y1, u16 color) {
 }
 
 void drawBackground() {
-    u16 skyColor = RGB5(14, 22, 31);   // Light Sky Blue
-    u16 grassColor = RGB5(8, 22, 8);   // Vibrant Grass Green
+    u16 skyColor = RGB5(14, 22, 31);
+    u16 grassColor = RGB5(8, 22, 8);
 
-    // Fill the top 60 pixels (Sky)
     int i = 0;
     for (; i < SCREEN_WIDTH * 60; i++) {
-        VIDEO_BUFFER[i] = skyColor;
+        // FIXED: Now writes to our invisible canvas
+        backBuffer[i] = skyColor;
     }
     
-    // Fill the remaining 100 pixels (Grass)
     for (; i < SCREEN_WIDTH * SCREEN_HEIGHT; i++) {
-        VIDEO_BUFFER[i] = grassColor;
+        // FIXED: Now writes to our invisible canvas
+        backBuffer[i] = grassColor;
     }
 }
 
@@ -120,6 +123,7 @@ public:
 };
 
 int main() {
+    backBuffer = (u16*)malloc(SCREEN_WIDTH * SCREEN_HEIGHT * 2);
     irqInit();
     irqEnable(IRQ_VBLANK);
 
@@ -127,8 +131,6 @@ int main() {
     ctx.switchState(GameState::MENU); 
 
     while (true) {
-        VBlankIntrWait();
-
         scanKeys();
         u16 keys = keysDown();
         u16 current_keys_held = keysHeld(); // FIXED: Changed from keysCurrent to keysHeld
@@ -213,6 +215,10 @@ int main() {
                 prev_sx_r = sx_r;
                 prev_sy = sy;
             }
+            
+            VBlankIntrWait();
+            dmaCopy(backBuffer, (void*)VIDEO_BUFFER, SCREEN_WIDTH * SCREEN_HEIGHT * 2);
+
         }
     }
 
