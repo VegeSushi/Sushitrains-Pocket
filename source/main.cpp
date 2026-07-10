@@ -75,35 +75,25 @@ void clearScreen(u16 color) {
     }
 }
 
-// --------------------------------------------------------
-// MAP DATA FORMAT
-// --------------------------------------------------------
 struct MapSegment {
-    float length; // How long the train drives on this segment
-    float curve;  // Negative = left curve, Positive = right curve, 0 = straight
+    float length;
+    float curve;
 };
 
-// Easily modifiable track layout
-const MapSegment trackMap[] = {
-    { 150.0f,  0.0f },   // Start straight
-    { 200.0f, -0.04f },  // Sharp left turn
-    { 100.0f,  0.0f },   // Straightaway
-    { 250.0f,  0.02f },  // Gentle right curve
-    { 150.0f, -0.01f },  // Slight left
-    { 300.0f,  0.0f }    // Long straight to finish
-};
-const int MAP_SEGMENTS = sizeof(trackMap) / sizeof(MapSegment);
+#define MAX_MAP_SEGMENTS 40
+MapSegment trackMap[MAX_MAP_SEGMENTS]; // Modifiable array
+int current_map_segments = 0;          // How many are actually used
 
 // Helper function to look up the track curve at a specific distance
 float getCurveAtDistance(float distance) {
     float current_dist = 0;
-    for (int i = 0; i < MAP_SEGMENTS; i++) {
+    for (int i = 0; i < current_map_segments; i++) {
         current_dist += trackMap[i].length;
         if (distance < current_dist) {
             return trackMap[i].curve;
         }
     }
-    return 0.0f; // Return straight if we run out of map
+    return 0.0f; 
 }
 
 // --------------------------------------------------------
@@ -126,11 +116,8 @@ public:
     int anim_timer;
     float total_map_length;
 
-    GameContext() : state(GameState::MENU), selected_option(0), needs_redraw(true), train_position(0.0f), speed(0.0f) {
-        total_map_length = 0.0f;
-        for (int i = 0; i < MAP_SEGMENTS; i++) {
-            total_map_length += trackMap[i].length;
-        }
+    GameContext() : state(GameState::MENU), selected_option(0), needs_redraw(true), train_position(0.0f), speed(0.0f), anim_timer(0) {
+        total_map_length = 0.0f; // Will be calculated when we hit Start
     }
 
     void switchState(GameState newState) {
@@ -151,6 +138,32 @@ public:
     }
 };
 
+void generateRandomMap(GameContext& ctx) {
+    // Pick a random number of segments between 15 and 25
+    current_map_segments = 15 + (rand() % 11); 
+    ctx.total_map_length = 0.0f;
+
+    for (int i = 0; i < current_map_segments; i++) {
+        if (i == 0 || i == current_map_segments - 1) {
+            // First and last segments are always long and straight
+            trackMap[i].length = 200.0f;
+            trackMap[i].curve = 0.0f;
+        } else {
+            // Random length between 100 and 300 meters
+            trackMap[i].length = 100.0f + (rand() % 201);
+            
+            // Random curve between -0.050f and +0.050f
+            trackMap[i].curve = ((rand() % 101) - 50) / 1000.0f; 
+            
+            // 25% chance to force a straight segment to break up constant turning
+            if (rand() % 4 == 0) {
+                trackMap[i].curve = 0.0f;
+            }
+        }
+        ctx.total_map_length += trackMap[i].length;
+    }
+}
+
 int main() {
     backBuffer = (u16*)malloc(SCREEN_WIDTH * SCREEN_HEIGHT * 2);
     irqInit();
@@ -158,13 +171,16 @@ int main() {
 
     GameContext ctx;
     ctx.switchState(GameState::MENU); 
+    
+    int menu_frame_counter = 0; // ADD THIS HERE
 
     while (true) {
         scanKeys();
         u16 keys = keysDown();
-        u16 current_keys_held = keysHeld(); // FIXED: Changed from keysCurrent to keysHeld
+        u16 current_keys_held = keysHeld(); 
 
         if (ctx.state == GameState::MENU) {
+            menu_frame_counter++;
             if (ctx.needs_redraw) {
                 iprintf("\x1b[2J"); 
                 
@@ -189,6 +205,8 @@ int main() {
 
             if (keys & KEY_A) {
                 if (ctx.selected_option == 0) {
+                    srand(menu_frame_counter); 
+                    generateRandomMap(ctx);
                     ctx.switchState(GameState::PLAY);
                 }
             }
@@ -285,62 +303,6 @@ int main() {
             
             // Draw train blip (Cyan)
             fillRect(train_dot_x, map_y - 1, 4, 6, RGB5(0, 31, 31));
-
-            // 3. LOCAL TOP-DOWN MAP (Bottom right corner)
-            int td_w = 40; // Smaller width
-            int td_h = 50; // Slightly taller to see ahead
-            int td_x = SCREEN_WIDTH - td_w - 5; 
-            int td_y = SCREEN_HEIGHT - td_h - 5; 
-            
-            // Draw map background
-            fillRect(td_x, td_y, td_w, td_h, RGB5(2, 2, 2));
-            drawRectOutline(td_x - 1, td_y - 1, td_w + 2, td_h + 2, RGB5(15, 15, 15));
-
-            float look_behind = 35.0f;
-            float look_ahead = 35.0f;
-            
-            // Pass 1: Find the train's exact X drift to use as our camera center
-            float train_sim_x = 0.0f;
-            float temp_dx = 0.0f;
-            for (float d = 0; d < ctx.train_position; d += 1.0f) {
-                temp_dx += (getCurveAtDistance(d) * 2.5f);
-                train_sim_x += temp_dx;
-            }
-
-            // Pass 2: Draw only the track window
-            float sim_dx = 0.0f;
-            float sim_x = 0.0f;
-            int prev_map_x = -1, prev_map_y = -1;
-            
-            for (float d = 0; d < ctx.train_position + look_ahead; d += 1.0f) {
-                sim_dx += (getCurveAtDistance(d) * 2.5f);
-                sim_x += sim_dx;
-
-                // Only draw if the track is within our 50m moving window
-                if (d >= ctx.train_position - look_behind) {
-                    // Map distance to Y axis (bottom = behind, top = ahead)
-                    float window_pos = d - (ctx.train_position - look_behind);
-                    int plot_y = td_y + td_h - (int)((window_pos / (look_ahead + look_behind)) * td_h);
-                    
-                    // Center the X axis around the train, scale down to fit the small box
-                    int plot_x = td_x + (td_w / 2) + (int)((sim_x - train_sim_x) * 0.2f);
-                    
-                    // Clamp drawing to the box so it doesn't spill over
-                    if (plot_x < td_x) plot_x = td_x;
-                    if (plot_x >= td_x + td_w) plot_x = td_x + td_w - 1;
-
-                    if (prev_map_x != -1) {
-                        drawLine(prev_map_x, prev_map_y, plot_x, plot_y, RGB5(10, 31, 10)); // Green track
-                    }
-                    prev_map_x = plot_x;
-                    prev_map_y = plot_y;
-                }
-            }
-            
-            // Draw the train exactly at its camera center
-            int p_plot_y = td_y + td_h - (int)((look_behind / (look_ahead + look_behind)) * td_h);
-            int p_plot_x = td_x + (td_w / 2);
-            fillRect(p_plot_x - 1, p_plot_y - 1, 3, 3, RGB5(31, 0, 0));
             
             VBlankIntrWait();
             dmaCopy(backBuffer, (void*)VIDEO_BUFFER, SCREEN_WIDTH * SCREEN_HEIGHT * 2);
